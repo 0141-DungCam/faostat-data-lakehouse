@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp, sum, desc, when
+# from pyspark.sql.functions import col, current_timestamp, sum, desc, when
 
 def main():
 
@@ -19,31 +19,74 @@ def main():
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
         .getOrCreate()
 
-    raw_df = spark.read.table("lakehouse.bronze.faostat_tcl_raw")
-    trade_df = raw_df.select(
-        col("Area").alias("country"),
-        col("Item").alias("product"),
-        col("Year").cast("int").alias("year"),
-        col("Value").cast("double").alias("trade_value"),
-        col("Unit").alias("unit"),
-        col("Element").alias("trade_type")
-    ).filter(col("trade_value").isNotNull())
+    # raw_df = spark.read.table("lakehouse.bronze.faostat_tcl_raw")
+    # trade_df = raw_df.select(
+    #     col("Area").alias("country"),
+    #     col("Item").alias("product"),
+    #     col("Year").cast("int").alias("year"),
+    #     col("Value").cast("double").alias("trade_value"),
+    #     col("Unit").alias("unit"),
+    #     col("Element").alias("trade_type")
+    # ).filter(col("trade_value").isNotNull())
+
+    trade_df = spark.sql(
+        """
+        SELECT 
+            Area as country, 
+            item as product, 
+            CAST(Year AS INT) as year, 
+            CAST(Value AS DOUBLE) as trade_value, 
+            Unit as unit,
+            Element as trade_type
+        FROM lakehouse.bronze.faostat_tcl_raw
+        WHERE CAST(Value AS DOUBLE) IS NOT NULL
+        """)
 
     spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse.silver")
 
     trade_df.write.format("iceberg").mode("overwrite").saveAsTable("lakehouse.silver.trade_data")
     
-    trade_balance_df = trade_df.groupBy("country", "year", "product") \
-        .pivot("trade_type", ["Import quantity", "Export quantity"]) \
-        .sum("trade_value") \
-        .withColumnRenamed("Import quantity", "imports") \
-        .withColumnRenamed("Export quantity", "exports") \
-        .fillna(0) \
-        .withColumn("trade_balance", col("exports") - col("imports")) \
-        .withColumn("net_position", 
-                    when(col("trade_balance") > 0, "Net Exporter")
-                    .when(col("trade_balance") < 0, "Net Importer")
-                    .otherwise("Balanced"))
+    # trade_balance_df = trade_df.groupBy("country", "year", "product") \
+    #     .pivot("trade_type", ["Import quantity", "Export quantity"]) \
+    #     .sum("trade_value") \
+    #     .withColumnRenamed("Import quantity", "imports") \
+    #     .withColumnRenamed("Export quantity", "exports") \
+    #     .fillna(0) \
+    #     .withColumn("trade_balance", col("exports") - col("imports")) \
+    #     .withColumn("net_position", 
+    #                 when(col("trade_balance") > 0, "Net Exporter")
+    #                 .when(col("trade_balance") < 0, "Net Importer")
+    #                 .otherwise("Balanced"))
+
+    trade_df.createOrReplaceTempView("trade_df")
+
+    trade_balance_df = spark.sql(
+        """
+        WITH PivotData AS (
+            SELECT 
+                country, 
+                product, 
+                year,
+                COALESCE(SUM(CASE WHEN trade_type = 'Import quantity' THEN trade_value END), 0) AS imports,
+                COALESCE(SUM(CASE WHEN trade_type = 'Export quantity' THEN trade_value END), 0) AS exports         
+            FROM trade_df
+            GROUP BY country, product, year 
+        )              
+        SELECT 
+            country, 
+            product, 
+            year, 
+            imports, 
+            exports,
+            (exports - imports) AS trade_balance,
+            CASE 
+                WHEN (exports - imports) > 0 THEN 'Net Exporter'
+                WHEN (exports - imports) < 0 THEN 'Net Importer'
+                ELSE 'Balanced'
+            END AS net_position
+        FROM PivotData                  
+        """
+    )
     
     spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse.gold")
     trade_balance_df.write.format("iceberg").mode("overwrite").saveAsTable("lakehouse.gold.trade_balance")

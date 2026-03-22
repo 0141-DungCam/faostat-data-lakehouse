@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp, sum, desc
+# from pyspark.sql.functions import col, current_timestamp, sum, desc
 
 def main():
 
@@ -19,24 +19,55 @@ def main():
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
         .getOrCreate()
 
-    raw_df = spark.read.table("lakehouse.bronze.faostat_qcl_raw")
-    production_df = raw_df.filter(col("Element") == "Production") \
-        .select(
-            col("Area").alias("country"),
-            col("Item").alias("crop"),
-            col("Year").cast("int").alias("year"),
-            col("Value").cast("double").alias("production_tonnes"),
-            col("Unit").alias("unit")
-        ).filter(col("production_tonnes").isNotNull())
+    # raw_df = spark.read.table("lakehouse.bronze.faostat_qcl_raw")
+    # production_df = raw_df.filter(col("Element") == "Production") \
+    #     .select(
+    #         col("Area").alias("country"),
+    #         col("Item").alias("crop"),
+    #         col("Year").cast("int").alias("year"),
+    #         col("Value").cast("double").alias("production_tonnes"),
+    #         col("Unit").alias("unit")
+    #     ).filter(col("production_tonnes").isNotNull())
+
+    production_df = spark.sql("""
+        SELECT 
+            Area AS country, 
+            Item AS crop, 
+            CAST(Year AS INT) AS year, 
+            CAST(Value AS DOUBLE) AS production_tonnes, 
+            Unit AS unit
+        FROM 
+            lakehouse.bronze.faostat_qcl_raw
+        WHERE 
+            Element = 'Production' 
+            AND CAST(Value AS DOUBLE) IS NOT NULL
+    """)
 
     spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse.silver")
-
     production_df.write.format("iceberg").mode("overwrite").saveAsTable("lakehouse.silver.crop_production")
+
+    production_df.createOrReplaceTempView("production_df")
     
-    yearly_global = production_df.groupBy("year", "crop").agg(sum("production_tonnes").alias("global_production"))
-    top_crops = production_df.groupBy("crop").agg(sum("production_tonnes").alias("global_production")) \
-        .orderBy(col("global_production").desc()) \
-        .limit(20)
+    # yearly_global = production_df.groupBy("year", "crop").agg(sum("production_tonnes").alias("global_production"))
+    # top_crops = production_df.groupBy("crop").agg(sum("production_tonnes").alias("global_production")) \
+    #     .orderBy(col("global_production").desc()) \
+    #     .limit(20)
+
+    yearly_global = spark.sql("""
+        SELECT year, crop, SUM(production_tonnes) AS global_production
+        FROM 
+            production_df
+        GROUP BY year, crop
+    """)
+
+    top_crops = spark.sql("""
+        SELECT crop, SUM(production_tonnes) AS global_production
+        FROM 
+            production_df
+        GROUP BY crop
+        ORDER BY global_production DESC
+        LIMIT 20
+    """)
         
     spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse.gold")
     yearly_global.write.format("iceberg").mode("overwrite").saveAsTable("lakehouse.gold.yearly_crop_production")

@@ -91,4 +91,25 @@ ingest_trade_data_by_spark = SparkSubmitOperator(
     dag=dag
 )
 
-[ingest_production_data_by_spark, ingest_trade_data_by_spark]
+transform_production_data = SparkSubmitOperator(
+    task_id='transform_production_data',
+    conn_id='spark_default',
+    conf=spark_conf,
+    packages=spark_packages,
+    application = '/opt/spark/jobs/transform_production_data.py',
+    dag=dag
+)
+
+transform_trade_data = SparkSubmitOperator(
+    task_id='transform_trade_data',
+    conn_id='spark_default',
+    conf=spark_conf,
+    packages=spark_packages,
+    application = '/opt/spark/jobs/transform_trade_data.py',
+    dag=dag
+)
+
+# [ingest_production_data_by_spark, ingest_trade_data_by_spark]
+
+ingest_production_data_by_spark >> transform_production_data
+ingest_trade_data_by_spark >> transform_trade_data
